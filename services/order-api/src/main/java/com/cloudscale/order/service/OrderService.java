@@ -1,51 +1,32 @@
 package com.cloudscale.order.service;
 
-import java.math.BigDecimal;
-import java.time.Instant;
-import java.util.List;
-import java.util.UUID;
-
-import org.springframework.stereotype.Service;
-
 import com.cloudscale.order.dto.CreateOrderRequest;
 import com.cloudscale.order.model.InventoryStatus;
 import com.cloudscale.order.model.Order;
 import com.cloudscale.order.model.OrderItem;
 import com.cloudscale.order.model.OrderStatus;
 import com.cloudscale.order.model.PaymentStatus;
-import com.cloudscale.order.repository.IdempotencyRepository;
 import com.cloudscale.order.repository.OrderRepository;
+import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
 
 @Service
 public class OrderService {
 
     private final OrderRepository orderRepository;
-    private final IdempotencyRepository idempotencyRepository;
 
-    public OrderService(
-            OrderRepository orderRepository,
-            IdempotencyRepository idempotencyRepository
-    ) {
+    public OrderService(OrderRepository orderRepository) {
         this.orderRepository = orderRepository;
-        this.idempotencyRepository = idempotencyRepository;
     }
 
     public Order createOrder(
             CreateOrderRequest request,
             String idempotencyKey
     ) {
-        var existingOrderId =
-                idempotencyRepository.findOrderId(idempotencyKey);
-
-        if (existingOrderId.isPresent()) {
-            return orderRepository
-                    .findById(existingOrderId.get())
-                    .orElseThrow(() ->
-                            new IllegalStateException(
-                                    "Idempotency record references a missing order"
-                            ));
-        }
-
         List<OrderItem> items = request.items()
                 .stream()
                 .map(item -> new OrderItem(
@@ -58,7 +39,9 @@ public class OrderService {
         BigDecimal totalAmount = items.stream()
                 .map(item ->
                         item.unitPrice()
-                                .multiply(BigDecimal.valueOf(item.quantity()))
+                                .multiply(
+                                        BigDecimal.valueOf(item.quantity())
+                                )
                 )
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
@@ -77,14 +60,14 @@ public class OrderService {
                 now
         );
 
-        Order saved = orderRepository.save(order);
+        long idempotencyExpiresAt =
+                now.plusSeconds(24 * 60 * 60).getEpochSecond();
 
-        idempotencyRepository.save(
+        return orderRepository.createAtomically(
+                order,
                 idempotencyKey,
-                saved.orderId()
+                idempotencyExpiresAt
         );
-
-        return saved;
     }
 
     public Order getOrder(String orderId) {

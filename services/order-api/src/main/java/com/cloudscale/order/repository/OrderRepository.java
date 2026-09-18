@@ -7,6 +7,12 @@ import com.cloudscale.order.model.Order;
 
 public interface OrderRepository {
 
+    Order createAtomically(
+            Order order,
+            String idempotencyKey,
+            long idempotencyExpiresAt
+    );
+
     Order save(Order order);
 
     Optional<Order> findById(String orderId);

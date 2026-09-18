@@ -14,8 +14,6 @@ import com.cloudscale.order.model.InventoryStatus;
 import com.cloudscale.order.model.Order;
 import com.cloudscale.order.model.OrderStatus;
 import com.cloudscale.order.model.PaymentStatus;
-import com.cloudscale.order.repository.IdempotencyRepository;
-import com.cloudscale.order.repository.InMemoryIdempotencyRepository;
 import com.cloudscale.order.repository.InMemoryOrderRepository;
 import com.cloudscale.order.repository.OrderRepository;
 
@@ -28,13 +26,7 @@ class OrderServiceTest {
         OrderRepository orderRepository =
                 new InMemoryOrderRepository();
 
-        IdempotencyRepository idempotencyRepository =
-                new InMemoryIdempotencyRepository();
-
-        orderService = new OrderService(
-                orderRepository,
-                idempotencyRepository
-        );
+        orderService = new OrderService(orderRepository);
     }
 
     @Test

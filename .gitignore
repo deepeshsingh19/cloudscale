@@ -42,3 +42,5 @@
 # Logs
 *.log
 logs/
+**/tfplan
+**/*.tfplan
