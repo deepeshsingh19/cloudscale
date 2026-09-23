@@ -7,6 +7,10 @@ import org.springframework.context.annotation.Configuration;
 
 import com.cloudscale.order.event.EventBridgeOrderEventPublisher;
 import com.cloudscale.order.event.OrderEventPublisher;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 
@@ -23,13 +27,23 @@ public class EventBridgeConfiguration {
     }
 
     @Bean
+    public ObjectMapper objectMapper() {
+        return JsonMapper.builder()
+                .addModule(new JavaTimeModule())
+                .disable(
+                        SerializationFeature.WRITE_DATES_AS_TIMESTAMPS
+                )
+                .build();
+    }
+
+    @Bean
     @ConditionalOnProperty(
             name = "cloudscale.event-publishing.enabled",
             havingValue = "true"
     )
     public OrderEventPublisher orderEventPublisher(
             EventBridgeClient eventBridgeClient,
-            com.fasterxml.jackson.databind.ObjectMapper objectMapper,
+            ObjectMapper objectMapper,
             @Value("${cloudscale.eventbridge.bus-name}")
             String eventBusName,
             @Value("${cloudscale.eventbridge.source}")
