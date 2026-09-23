@@ -7,7 +7,7 @@ import com.cloudscale.order.model.Order;
 
 public interface OrderRepository {
 
-    Order createAtomically(
+    CreateOrderResult createAtomically(
             Order order,
             String idempotencyKey,
             long idempotencyExpiresAt
@@ -18,4 +18,10 @@ public interface OrderRepository {
     Optional<Order> findById(String orderId);
 
     List<Order> findAll();
+
+    record CreateOrderResult(
+            Order order,
+            boolean created
+    ) {
+    }
 }

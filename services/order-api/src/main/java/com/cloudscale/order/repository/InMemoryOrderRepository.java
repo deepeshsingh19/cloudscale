@@ -1,14 +1,15 @@
 package com.cloudscale.order.repository;
 
-import com.cloudscale.order.model.Order;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.stereotype.Repository;
-
-import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Repository;
+
+import com.cloudscale.order.model.Order;
 
 @Repository
 @ConditionalOnProperty(
@@ -25,7 +26,7 @@ public class InMemoryOrderRepository implements OrderRepository {
             new ConcurrentHashMap<>();
 
     @Override
-    public synchronized Order createAtomically(
+    public synchronized CreateOrderResult createAtomically(
             Order order,
             String idempotencyKey,
             long idempotencyExpiresAt
@@ -34,16 +35,33 @@ public class InMemoryOrderRepository implements OrderRepository {
                 idempotencyKeys.get(idempotencyKey);
 
         if (existingOrderId != null) {
-            return orders.get(existingOrderId);
+            Order existingOrder =
+                    orders.get(existingOrderId);
+
+            if (existingOrder == null) {
+                throw new IllegalStateException(
+                        "Idempotency record points to missing order: "
+                                + existingOrderId
+                );
+            }
+
+            return new CreateOrderResult(
+                    existingOrder,
+                    false
+            );
         }
 
         orders.put(order.orderId(), order);
+
         idempotencyKeys.put(
                 idempotencyKey,
                 order.orderId()
         );
 
-        return order;
+        return new CreateOrderResult(
+                order,
+                true
+        );
     }
 
     @Override
@@ -54,17 +72,15 @@ public class InMemoryOrderRepository implements OrderRepository {
 
     @Override
     public Optional<Order> findById(String orderId) {
-        return Optional.ofNullable(orders.get(orderId));
+        return Optional.ofNullable(
+                orders.get(orderId)
+        );
     }
 
     @Override
     public List<Order> findAll() {
-        return orders.values()
-                .stream()
-                .sorted(
-                        Comparator.comparing(Order::createdAt)
-                                .reversed()
-                )
-                .toList();
+        return new ArrayList<>(
+                orders.values()
+        );
     }
 }

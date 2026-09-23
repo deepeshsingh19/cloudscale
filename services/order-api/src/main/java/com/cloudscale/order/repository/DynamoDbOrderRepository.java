@@ -1,35 +1,34 @@
 package com.cloudscale.order.repository;
 
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
 import com.cloudscale.order.model.InventoryStatus;
 import com.cloudscale.order.model.Order;
 import com.cloudscale.order.model.OrderItem;
 import com.cloudscale.order.model.OrderStatus;
 import com.cloudscale.order.model.PaymentStatus;
+
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.Put;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
+import software.amazon.awssdk.services.dynamodb.model.ScanResponse;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
 import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
-
-import java.math.BigDecimal;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 
 public class DynamoDbOrderRepository implements OrderRepository {
 
     private static final String ORDER_SK = "ORDER";
     private static final String IDEMPOTENCY_SK = "IDEMPOTENCY";
 
-    private static final String ENTITY_ORDER = "ORDER";
-    private static final String ENTITY_IDEMPOTENCY = "IDEMPOTENCY";
+    private static final String ORDER_ENTITY = "ORDER";
+    private static final String IDEMPOTENCY_ENTITY = "IDEMPOTENCY";
 
     private final DynamoDbClient dynamoDbClient;
     private final String tableName;
@@ -43,75 +42,134 @@ public class DynamoDbOrderRepository implements OrderRepository {
     }
 
     @Override
-    public Order createAtomically(
+    public CreateOrderResult createAtomically(
             Order order,
             String idempotencyKey,
             long idempotencyExpiresAt
     ) {
         Optional<String> existingOrderId =
-                findOrderIdByIdempotencyKey(idempotencyKey);
+                findOrderIdByIdempotencyKey(
+                        idempotencyKey
+                );
 
         if (existingOrderId.isPresent()) {
-            return findById(existingOrderId.get())
-                    .orElseThrow(() ->
-                            new IllegalStateException(
-                                    "Idempotency record references missing order"
-                            ));
+            Order existingOrder =
+                    findById(existingOrderId.get())
+                            .orElseThrow(() ->
+                                    new IllegalStateException(
+                                            "Idempotency record points to missing order: "
+                                                    + existingOrderId.get()
+                                    )
+                            );
+
+            return new CreateOrderResult(
+                    existingOrder,
+                    false
+            );
         }
 
         Map<String, AttributeValue> orderItem =
-                toOrderItem(order);
+                toDynamoItem(order);
 
         Map<String, AttributeValue> idempotencyItem =
-                toIdempotencyItem(
-                        idempotencyKey,
-                        order.orderId(),
-                        idempotencyExpiresAt
+                Map.of(
+                        "PK", stringValue(
+                                "IDEMPOTENCY#"
+                                        + idempotencyKey
+                        ),
+                        "SK", stringValue(
+                                IDEMPOTENCY_SK
+                        ),
+                        "entityType", stringValue(
+                                IDEMPOTENCY_ENTITY
+                        ),
+                        "idempotencyKey", stringValue(
+                                idempotencyKey
+                        ),
+                        "orderId", stringValue(
+                                order.orderId()
+                        ),
+                        "expiresAt", numberValue(
+                                idempotencyExpiresAt
+                        )
                 );
+
+        Put orderPut = Put.builder()
+                .tableName(tableName)
+                .item(orderItem)
+                .conditionExpression(
+                        "attribute_not_exists(PK)"
+                )
+                .build();
+
+        Put idempotencyPut = Put.builder()
+                .tableName(tableName)
+                .item(idempotencyItem)
+                .conditionExpression(
+                        "attribute_not_exists(PK)"
+                )
+                .build();
 
         TransactWriteItem orderWrite =
                 TransactWriteItem.builder()
-                        .put(put -> put
-                                .tableName(tableName)
-                                .item(orderItem))
+                        .put(orderPut)
                         .build();
 
         TransactWriteItem idempotencyWrite =
                 TransactWriteItem.builder()
-                        .put(put -> put
-                                .tableName(tableName)
-                                .item(idempotencyItem)
-                                .conditionExpression(
-                                        "attribute_not_exists(PK)"
-                                ))
+                        .put(idempotencyPut)
+                        .build();
+
+        TransactWriteItemsRequest request =
+                TransactWriteItemsRequest.builder()
+                        .transactItems(
+                                orderWrite,
+                                idempotencyWrite
+                        )
                         .build();
 
         try {
             dynamoDbClient.transactWriteItems(
-                    TransactWriteItemsRequest.builder()
-                            .transactItems(
-                                    orderWrite,
-                                    idempotencyWrite
-                            )
-                            .build()
+                    request
             );
 
-            return order;
+            return new CreateOrderResult(
+                    order,
+                    true
+            );
 
         } catch (TransactionCanceledException exception) {
 
             /*
-             * Another request may have created the same
-             * idempotency key concurrently.
+             * The transaction may have been cancelled because
+             * another request won the idempotency race.
              *
-             * Resolve the existing order and return it.
+             * Re-read the idempotency record before deciding that
+             * this was a duplicate request.
              */
-            return findOrderIdByIdempotencyKey(idempotencyKey)
-                    .flatMap(this::findById)
-                    .orElseThrow(() ->
-                            new IllegalStateException(
-                                    "Order creation transaction was cancelled"
-                            ));
+            Optional<String> existingAfterConflict =
+                    findOrderIdByIdempotencyKey(
+                            idempotencyKey
+                    );
+
+            if (existingAfterConflict.isPresent()) {
+                Order existingOrder =
+                        findById(
+                                existingAfterConflict.get()
+                        ).orElseThrow(() ->
+                                new IllegalStateException(
+                                        "Idempotency record points to missing order: "
+                                                + existingAfterConflict.get()
+                                )
+                        );
+
+                return new CreateOrderResult(
+                        existingOrder,
+                        false
+                );
+            }
+
+            throw exception;
         }
     }
 
@@ -120,7 +178,7 @@ public class DynamoDbOrderRepository implements OrderRepository {
         dynamoDbClient.putItem(
                 PutItemRequest.builder()
                         .tableName(tableName)
-                        .item(toOrderItem(order))
+                        .item(toDynamoItem(order))
                         .build()
         );
 
@@ -129,94 +187,100 @@ public class DynamoDbOrderRepository implements OrderRepository {
 
     @Override
     public Optional<Order> findById(String orderId) {
-        Map<String, AttributeValue> key =
-                Map.of(
-                        "PK",
-                        AttributeValue.builder()
-                                .s("ORDER#" + orderId)
-                                .build(),
-                        "SK",
-                        AttributeValue.builder()
-                                .s(ORDER_SK)
-                                .build()
-                );
+        GetItemRequest request =
+                GetItemRequest.builder()
+                        .tableName(tableName)
+                        .key(
+                                Map.of(
+                                        "PK",
+                                        stringValue(
+                                                "ORDER#"
+                                                        + orderId
+                                        ),
+                                        "SK",
+                                        stringValue(
+                                                ORDER_SK
+                                        )
+                                )
+                        )
+                        .build();
 
         var response =
-                dynamoDbClient.getItem(
-                        GetItemRequest.builder()
-                                .tableName(tableName)
-                                .key(key)
-                                .consistentRead(true)
-                                .build()
-                );
+                dynamoDbClient.getItem(request);
 
-        if (!response.hasItem()) {
+        if (!response.hasItem()
+                || response.item().isEmpty()) {
             return Optional.empty();
         }
 
-        return Optional.of(fromOrderItem(response.item()));
+        return Optional.of(
+                fromDynamoItem(
+                        response.item()
+                )
+        );
     }
 
     @Override
     public List<Order> findAll() {
-        var response =
-                dynamoDbClient.scan(
-                        ScanRequest.builder()
-                                .tableName(tableName)
-                                .filterExpression(
-                                        "entityType = :entityType"
-                                )
-                                .expressionAttributeValues(
-                                        Map.of(
-                                                ":entityType",
-                                                AttributeValue.builder()
-                                                        .s(ENTITY_ORDER)
-                                                        .build()
+        ScanRequest request =
+                ScanRequest.builder()
+                        .tableName(tableName)
+                        .filterExpression(
+                                "entityType = :entityType"
+                        )
+                        .expressionAttributeValues(
+                                Map.of(
+                                        ":entityType",
+                                        stringValue(
+                                                ORDER_ENTITY
                                         )
                                 )
-                                .build()
-                );
+                        )
+                        .build();
+
+        ScanResponse response =
+                dynamoDbClient.scan(request);
 
         return response.items()
                 .stream()
-                .map(this::fromOrderItem)
-                .sorted(
-                        Comparator.comparing(Order::createdAt)
-                                .reversed()
-                )
+                .map(this::fromDynamoItem)
                 .toList();
     }
 
     private Optional<String> findOrderIdByIdempotencyKey(
             String idempotencyKey
     ) {
-        Map<String, AttributeValue> key =
-                Map.of(
-                        "PK",
-                        AttributeValue.builder()
-                                .s("IDEMPOTENCY#" + idempotencyKey)
-                                .build(),
-                        "SK",
-                        AttributeValue.builder()
-                                .s(IDEMPOTENCY_SK)
-                                .build()
-                );
+        GetItemRequest request =
+                GetItemRequest.builder()
+                        .tableName(tableName)
+                        .key(
+                                Map.of(
+                                        "PK",
+                                        stringValue(
+                                                "IDEMPOTENCY#"
+                                                        + idempotencyKey
+                                        ),
+                                        "SK",
+                                        stringValue(
+                                                IDEMPOTENCY_SK
+                                        )
+                                )
+                        )
+                        .projectionExpression(
+                                "orderId"
+                        )
+                        .build();
 
         var response =
-                dynamoDbClient.getItem(
-                        GetItemRequest.builder()
-                                .tableName(tableName)
-                                .key(key)
-                                .consistentRead(true)
-                                .build()
-                );
+                dynamoDbClient.getItem(request);
 
-        if (!response.hasItem()) {
+        if (!response.hasItem()
+                || response.item().isEmpty()) {
             return Optional.empty();
         }
 
         AttributeValue orderId =
-        response.item().get("orderId");
+                response.item().get("orderId");
 
         if (orderId == null
                 || orderId.s() == null
@@ -224,80 +288,57 @@ public class DynamoDbOrderRepository implements OrderRepository {
             return Optional.empty();
         }
 
-        return Optional.of(orderId.s());
+        return Optional.of(
+                orderId.s()
+        );
     }
 
-    private Map<String, AttributeValue> toOrderItem(
-            Order order
-    ) {
+    private Map<String, AttributeValue> toDynamoItem(
+        Order order
+        ) {
         Map<String, AttributeValue> item =
-                new HashMap<>();
-
-        item.put(
-                "PK",
-                stringValue("ORDER#" + order.orderId())
-        );
-
-        item.put(
-                "SK",
-                stringValue(ORDER_SK)
-        );
-
-        item.put(
-                "entityType",
-                stringValue(ENTITY_ORDER)
-        );
-
-        item.put(
-                "orderId",
-                stringValue(order.orderId())
-        );
-
-        item.put(
-                "customerId",
-                stringValue(order.customerId())
-        );
-
-        item.put(
-                "totalAmount",
-                stringValue(order.totalAmount().toPlainString())
-        );
-
-        item.put(
-                "currency",
-                stringValue(order.currency())
-        );
-
-        item.put(
-                "status",
-                stringValue(order.status().name())
-        );
-
-        item.put(
-                "paymentStatus",
-                stringValue(order.paymentStatus().name())
-        );
-
-        item.put(
-                "inventoryStatus",
-                stringValue(order.inventoryStatus().name())
-        );
-
-        item.put(
-                "createdAt",
-                stringValue(order.createdAt().toString())
-        );
-
-        item.put(
-                "updatedAt",
-                stringValue(order.updatedAt().toString())
-        );
+                new java.util.HashMap<>();
 
         List<AttributeValue> items =
                 order.items()
                         .stream()
-                        .map(this::toOrderItemAttribute)
+                        .map(this::toDynamoItem)
                         .toList();
+
+        item.put(
+                "PK",
+                stringValue(
+                        "ORDER#" + order.orderId()
+                )
+        );
+
+        item.put(
+                "SK",
+                stringValue(
+                        ORDER_SK
+                )
+        );
+
+        item.put(
+                "entityType",
+                stringValue(
+                        ORDER_ENTITY
+                )
+        );
+
+        item.put(
+                "orderId",
+                stringValue(
+                        order.orderId()
+                )
+        );
+
+        item.put(
+                "customerId",
+                stringValue(
+                        order.customerId()
+                )
+        );
 
         item.put(
                 "items",
@@ -306,145 +347,221 @@ public class DynamoDbOrderRepository implements OrderRepository {
                         .build()
         );
 
-        return item;
-    }
-
-    private Map<String, AttributeValue> toIdempotencyItem(
-            String idempotencyKey,
-            String orderId,
-            long expiresAt
-    ) {
-        Map<String, AttributeValue> item =
-                new HashMap<>();
-
         item.put(
-                "PK",
+                "totalAmount",
                 stringValue(
-                        "IDEMPOTENCY#" + idempotencyKey
+                        order.totalAmount()
+                                .toPlainString()
                 )
         );
 
         item.put(
-                "SK",
-                stringValue(IDEMPOTENCY_SK)
+                "currency",
+                stringValue(
+                        order.currency()
+                )
         );
 
         item.put(
-                "entityType",
-                stringValue(ENTITY_IDEMPOTENCY)
+                "status",
+                stringValue(
+                        order.status().name()
+                )
         );
 
         item.put(
-                "idempotencyKey",
-                stringValue(idempotencyKey)
+                "paymentStatus",
+                stringValue(
+                        order.paymentStatus().name()
+                )
         );
 
         item.put(
-                "orderId",
-                stringValue(orderId)
+                "inventoryStatus",
+                stringValue(
+                        order.inventoryStatus().name()
+                )
         );
 
         item.put(
-                "expiresAt",
-                AttributeValue.builder()
-                        .n(Long.toString(expiresAt))
-                        .build()
+                "createdAt",
+                stringValue(
+                        order.createdAt().toString()
+                )
+        );
+
+        item.put(
+                "updatedAt",
+                stringValue(
+                        order.updatedAt().toString()
+                )
         );
 
         return item;
-    }
+        }
 
-    private AttributeValue toOrderItemAttribute(
+    private AttributeValue toDynamoItem(
             OrderItem item
     ) {
-        Map<String, AttributeValue> map =
-                new HashMap<>();
-
-        map.put(
-                "productId",
-                stringValue(item.productId())
-        );
-
-        map.put(
-                "quantity",
-                AttributeValue.builder()
-                        .n(Integer.toString(item.quantity()))
-                        .build()
-        );
-
-        map.put(
-                "unitPrice",
-                stringValue(
-                        item.unitPrice().toPlainString()
-                )
-        );
-
         return AttributeValue.builder()
-                .m(map)
+                .m(
+                        Map.of(
+                                "productId",
+                                stringValue(
+                                        item.productId()
+                                ),
+                                "quantity",
+                                numberValue(
+                                        item.quantity()
+                                ),
+                                "unitPrice",
+                                stringValue(
+                                        item.unitPrice()
+                                                .toPlainString()
+                                )
+                        )
+                )
                 .build();
     }
 
-    private Order fromOrderItem(
+    private Order fromDynamoItem(
             Map<String, AttributeValue> item
     ) {
         List<OrderItem> orderItems =
-                new ArrayList<>();
-
-        AttributeValue itemsAttribute =
-                item.get("items");
-
-        if (itemsAttribute != null &&
-                itemsAttribute.hasL()) {
-
-            for (AttributeValue value :
-                    itemsAttribute.l()) {
-
-                Map<String, AttributeValue> map =
-                        value.m();
-
-                orderItems.add(
-                        new OrderItem(
-                                map.get("productId").s(),
-                                Integer.parseInt(
-                                        map.get("quantity").n()
-                                ),
-                                new BigDecimal(
-                                        map.get("unitPrice").s()
-                                )
-                        )
-                );
-            }
-        }
+                item.get("items")
+                        .l()
+                        .stream()
+                        .map(this::fromDynamoItem)
+                        .toList();
 
         return new Order(
-                item.get("orderId").s(),
-                item.get("customerId").s(),
+                requiredString(
+                        item,
+                        "orderId"
+                ),
+                requiredString(
+                        item,
+                        "customerId"
+                ),
                 orderItems,
                 new BigDecimal(
-                        item.get("totalAmount").s()
+                        requiredString(
+                                item,
+                                "totalAmount"
+                        )
                 ),
-                item.get("currency").s(),
+                requiredString(
+                        item,
+                        "currency"
+                ),
                 OrderStatus.valueOf(
-                        item.get("status").s()
+                        requiredString(
+                                item,
+                                "status"
+                        )
                 ),
                 PaymentStatus.valueOf(
-                        item.get("paymentStatus").s()
+                        requiredString(
+                                item,
+                                "paymentStatus"
+                        )
                 ),
                 InventoryStatus.valueOf(
-                        item.get("inventoryStatus").s()
+                        requiredString(
+                                item,
+                                "inventoryStatus"
+                        )
                 ),
-                Instant.parse(
-                        item.get("createdAt").s()
+                java.time.Instant.parse(
+                        requiredString(
+                                item,
+                                "createdAt"
+                        )
                 ),
-                Instant.parse(
-                        item.get("updatedAt").s()
+                java.time.Instant.parse(
+                        requiredString(
+                                item,
+                                "updatedAt"
+                        )
                 )
         );
     }
 
-    private AttributeValue stringValue(String value) {
+    private OrderItem fromDynamoItem(
+            AttributeValue value
+    ) {
+        Map<String, AttributeValue> map =
+                value.m();
+
+        return new OrderItem(
+                requiredString(
+                        map,
+                        "productId"
+                ),
+                Integer.parseInt(
+                        requiredString(
+                                map,
+                                "quantity"
+                        )
+                ),
+                new BigDecimal(
+                        requiredString(
+                                map,
+                                "unitPrice"
+                        )
+                )
+        );
+    }
+
+    private String requiredString(
+            Map<String, AttributeValue> item,
+            String key
+    ) {
+        AttributeValue value =
+                item.get(key);
+
+        if (value == null) {
+            throw new IllegalStateException(
+                    "Missing DynamoDB attribute: "
+                            + key
+            );
+        }
+
+        if (value.s() != null) {
+            return value.s();
+        }
+
+        if (value.n() != null) {
+            return value.n();
+        }
+
+        throw new IllegalStateException(
+                "Unsupported DynamoDB attribute type for: "
+                        + key
+        );
+    }
+
+    private static AttributeValue stringValue(
+            String value
+    ) {
         return AttributeValue.builder()
                 .s(value)
+                .build();
+    }
+
+    private static AttributeValue numberValue(
+            long value
+    ) {
+        return AttributeValue.builder()
+                .n(Long.toString(value))
+                .build();
+    }
+
+    private static AttributeValue numberValue(
+            int value
+    ) {
+        return AttributeValue.builder()
+                .n(Integer.toString(value))
                 .build();
     }
 }

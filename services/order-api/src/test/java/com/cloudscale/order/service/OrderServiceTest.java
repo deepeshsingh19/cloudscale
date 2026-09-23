@@ -1,167 +1,282 @@
 package com.cloudscale.order.service;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import org.mockito.Mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.cloudscale.order.dto.CreateOrderRequest;
+import com.cloudscale.order.event.OrderEventPublisher;
 import com.cloudscale.order.model.InventoryStatus;
 import com.cloudscale.order.model.Order;
 import com.cloudscale.order.model.OrderStatus;
 import com.cloudscale.order.model.PaymentStatus;
-import com.cloudscale.order.repository.InMemoryOrderRepository;
 import com.cloudscale.order.repository.OrderRepository;
 
+@ExtendWith(MockitoExtension.class)
 class OrderServiceTest {
+
+    @Mock
+    private OrderRepository orderRepository;
+
+    @Mock
+    private OrderEventPublisher orderEventPublisher;
 
     private OrderService orderService;
 
     @BeforeEach
     void setUp() {
-        OrderRepository orderRepository =
-                new InMemoryOrderRepository();
-
-        orderService = new OrderService(orderRepository);
+        orderService =
+                new OrderService(
+                        orderRepository,
+                        Optional.of(orderEventPublisher)
+                );
     }
 
     @Test
     void shouldCreateOrderAndCalculateTotal() {
-        CreateOrderRequest request = new CreateOrderRequest(
+        CreateOrderRequest request =
+                createRequest();
+
+        when(
+                orderRepository.createAtomically(
+                        any(Order.class),
+                        eq("key-1"),
+                        anyLong()
+                )
+        ).thenAnswer(invocation ->
+                new OrderRepository.CreateOrderResult(
+                        invocation.getArgument(0),
+                        true
+                )
+        );
+
+        Order order =
+                orderService.createOrder(
+                        request,
+                        "key-1"
+                );
+
+        assertEquals(
+                new BigDecimal("1499.00"),
+                order.totalAmount()
+        );
+
+        assertEquals(
+                OrderStatus.CREATED,
+                order.status()
+        );
+
+        assertEquals(
+                PaymentStatus.PENDING,
+                order.paymentStatus()
+        );
+
+        assertEquals(
+                InventoryStatus.PENDING,
+                order.inventoryStatus()
+        );
+
+        verify(orderEventPublisher)
+                .publishOrderCreated(order);
+    }
+
+    @Test
+    void shouldNotPublishEventForDuplicateIdempotencyKey() {
+        CreateOrderRequest request =
+                createRequest();
+
+        Order existingOrder =
+                existingOrder();
+
+        when(
+                orderRepository.createAtomically(
+                        any(Order.class),
+                        eq("duplicate-key"),
+                        anyLong()
+                )
+        ).thenReturn(
+                new OrderRepository.CreateOrderResult(
+                        existingOrder,
+                        false
+                )
+        );
+
+        Order result =
+                orderService.createOrder(
+                        request,
+                        "duplicate-key"
+                );
+
+        assertEquals(
+                existingOrder,
+                result
+        );
+
+        verify(
+                orderEventPublisher,
+                never()
+        ).publishOrderCreated(
+                any(Order.class)
+        );
+    }
+
+    @Test
+    void shouldPublishEventForDifferentIdempotencyKeys() {
+        CreateOrderRequest request =
+                createRequest();
+
+        when(
+                orderRepository.createAtomically(
+                        any(Order.class),
+                        any(String.class),
+                        anyLong()
+                )
+        ).thenAnswer(invocation ->
+                new OrderRepository.CreateOrderResult(
+                        invocation.getArgument(0),
+                        true
+                )
+        );
+
+        Order first =
+                orderService.createOrder(
+                        request,
+                        "key-1"
+                );
+
+        Order second =
+                orderService.createOrder(
+                        request,
+                        "key-2"
+                );
+
+        verify(orderEventPublisher)
+                .publishOrderCreated(first);
+
+        verify(orderEventPublisher)
+                .publishOrderCreated(second);
+    }
+
+    @Test
+    void shouldReturnExistingOrder() {
+        Order order =
+                existingOrder();
+
+        when(
+                orderRepository.findById(
+                        order.orderId()
+                )
+        ).thenReturn(
+                Optional.of(order)
+        );
+
+        Order result =
+                orderService.getOrder(
+                        order.orderId()
+                );
+
+        assertEquals(
+                order,
+                result
+        );
+    }
+
+    @Test
+    void shouldThrowWhenOrderDoesNotExist() {
+        when(
+                orderRepository.findById(
+                        "missing-order"
+                )
+        ).thenReturn(
+                Optional.empty()
+        );
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        orderService.getOrder(
+                                "missing-order"
+                        )
+        );
+    }
+
+    @Test
+    void shouldListOrders() {
+        Order order =
+                existingOrder();
+
+        when(
+                orderRepository.findAll()
+        ).thenReturn(
+                List.of(order)
+        );
+
+        List<Order> orders =
+                orderService.getOrders();
+
+        assertEquals(
+                1,
+                orders.size()
+        );
+
+        assertEquals(
+                order,
+                orders.get(0)
+        );
+    }
+
+    private CreateOrderRequest createRequest() {
+        return new CreateOrderRequest(
                 "CUS-1001",
                 List.of(
                         new CreateOrderRequest.OrderItemRequest(
                                 "PROD-001",
                                 2,
                                 new BigDecimal("749.50")
-                        ),
-                        new CreateOrderRequest.OrderItemRequest(
-                                "PROD-002",
-                                1,
-                                new BigDecimal("500.00")
                         )
                 ),
                 "INR"
         );
+    }
 
-        Order order =
-                orderService.createOrder(request, "idem-001");
+    private Order existingOrder() {
+        Instant now =
+                Instant.parse(
+                        "2026-09-23T10:00:00Z"
+                );
 
-        assertNotNull(order.orderId());
-        assertEquals("CUS-1001", order.customerId());
-        assertEquals(
-                new BigDecimal("1999.00"),
-                order.totalAmount()
-        );
-        assertEquals(OrderStatus.CREATED, order.status());
-        assertEquals(
+        return new Order(
+                "ORD-existing",
+                "CUS-1001",
+                List.of(
+                        new com.cloudscale.order.model.OrderItem(
+                                "PROD-001",
+                                2,
+                                new BigDecimal("749.50")
+                        )
+                ),
+                new BigDecimal("1499.00"),
+                "INR",
+                OrderStatus.CREATED,
                 PaymentStatus.PENDING,
-                order.paymentStatus()
-        );
-        assertEquals(
                 InventoryStatus.PENDING,
-                order.inventoryStatus()
+                now,
+                now
         );
-    }
-
-    @Test
-    void shouldReturnSameOrderForDuplicateIdempotencyKey() {
-        CreateOrderRequest request = new CreateOrderRequest(
-                "CUS-1001",
-                List.of(
-                        new CreateOrderRequest.OrderItemRequest(
-                                "PROD-001",
-                                1,
-                                new BigDecimal("100.00")
-                        )
-                ),
-                "INR"
-        );
-
-        Order first =
-                orderService.createOrder(request, "idem-duplicate");
-
-        Order second =
-                orderService.createOrder(request, "idem-duplicate");
-
-        assertEquals(first.orderId(), second.orderId());
-        assertEquals(
-                first.createdAt(),
-                second.createdAt()
-        );
-    }
-
-    @Test
-    void shouldCreateDifferentOrdersForDifferentIdempotencyKeys() {
-        CreateOrderRequest request = new CreateOrderRequest(
-                "CUS-1001",
-                List.of(
-                        new CreateOrderRequest.OrderItemRequest(
-                                "PROD-001",
-                                1,
-                                new BigDecimal("100.00")
-                        )
-                ),
-                "INR"
-        );
-
-        Order first =
-                orderService.createOrder(request, "idem-001");
-
-        Order second =
-                orderService.createOrder(request, "idem-002");
-
-        assertNotEquals(first.orderId(), second.orderId());
-    }
-
-    @Test
-    void shouldRetrieveCreatedOrder() {
-        CreateOrderRequest request = new CreateOrderRequest(
-                "CUS-1001",
-                List.of(
-                        new CreateOrderRequest.OrderItemRequest(
-                                "PROD-001",
-                                1,
-                                new BigDecimal("250.00")
-                        )
-                ),
-                "INR"
-        );
-
-        Order created =
-                orderService.createOrder(request, "idem-get");
-
-        Order retrieved =
-                orderService.getOrder(created.orderId());
-
-        assertEquals(created.orderId(), retrieved.orderId());
-        assertEquals(
-                created.totalAmount(),
-                retrieved.totalAmount()
-        );
-    }
-
-    @Test
-    void shouldReturnAllOrders() {
-        CreateOrderRequest request = new CreateOrderRequest(
-                "CUS-1001",
-                List.of(
-                        new CreateOrderRequest.OrderItemRequest(
-                                "PROD-001",
-                                1,
-                                new BigDecimal("100.00")
-                        )
-                ),
-                "INR"
-        );
-
-        orderService.createOrder(request, "idem-1");
-        orderService.createOrder(request, "idem-2");
-
-        assertEquals(2, orderService.getOrders().size());
     }
 }
