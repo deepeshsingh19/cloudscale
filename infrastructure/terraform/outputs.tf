@@ -37,3 +37,18 @@ output "inventory_queue_arn" {
   description = "Inventory SQS queue ARN."
   value       = aws_sqs_queue.inventory.arn
 }
+
+output "payment_worker_function_name" {
+  description = "Payment Worker Lambda function name."
+  value       = aws_lambda_function.payment_worker.function_name
+}
+
+output "payment_worker_function_arn" {
+  description = "Payment Worker Lambda function ARN."
+  value       = aws_lambda_function.payment_worker.arn
+}
+
+output "payment_worker_role_arn" {
+  description = "Payment Worker Lambda IAM role ARN."
+  value       = aws_iam_role.payment_worker.arn
+}
