@@ -49,6 +49,7 @@ resource "aws_iam_role_policy" "payment_worker" {
 
         Action = [
           "dynamodb:GetItem",
+          "dynamodb:PutItem",
           "dynamodb:UpdateItem",
           "dynamodb:TransactWriteItems"
         ]
