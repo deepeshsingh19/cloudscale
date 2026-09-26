@@ -2,6 +2,7 @@ package com.cloudscale.payment;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Optional;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -61,10 +62,24 @@ public class PaymentProcessor {
                         .path("data");
 
         String orderId =
-                requiredText(
-                        data,
-                        "orderId"
+                requiredText(data, "orderId");
+
+        /*
+         * First check whether a previous invocation already
+         * created an outbox event but failed before publishing
+         * or marking it published.
+         */
+        Optional<PaymentOutboxRecord> pendingOutbox =
+                paymentRepository.findPendingOutbox(
+                        orderId
                 );
+
+        if (pendingOutbox.isPresent()) {
+            publishPendingOutbox(
+                    pendingOutbox.get()
+            );
+            return;
+        }
 
         String customerId =
                 requiredText(
@@ -72,22 +87,13 @@ public class PaymentProcessor {
                         "customerId"
                 );
 
-        BigDecimal totalAmount;
-
-        try {
-            totalAmount =
-                    new BigDecimal(
-                            requiredText(
-                                    data,
-                                    "totalAmount"
-                            )
-                    );
-        } catch (NumberFormatException exception) {
-            throw new IllegalArgumentException(
-                    "Invalid totalAmount",
-                    exception
-            );
-        }
+        BigDecimal totalAmount =
+                parseAmount(
+                        requiredText(
+                                data,
+                                "totalAmount"
+                        )
+                );
 
         String currency =
                 requiredText(
@@ -111,51 +117,132 @@ public class PaymentProcessor {
                         ? "COMPLETED"
                         : "FAILED";
 
-        boolean transitioned =
-                paymentRepository
-                        .markPaymentStatusIfPending(
+        PaymentResultEvent resultEvent =
+                paymentSucceeds
+                        ? PaymentResultEvent.completed(
                                 orderId,
-                                targetStatus,
+                                customerId,
+                                totalAmount,
+                                currency,
+                                occurredAt
+                        )
+                        : PaymentResultEvent.failed(
+                                orderId,
+                                customerId,
+                                totalAmount,
+                                currency,
+                                buildFailureReason(
+                                        customerId,
+                                        totalAmount
+                                ),
                                 occurredAt
                         );
 
-        /*
-         * Another invocation has already processed this
-         * order, so do not publish another result event.
-         */
-        if (!transitioned) {
+        String eventPayload;
+
+        try {
+            eventPayload =
+                    objectMapper.writeValueAsString(
+                            resultEvent
+                    );
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "Failed to serialize payment event",
+                    exception
+            );
+        }
+
+        PaymentOutboxRecord outboxRecord =
+                new PaymentOutboxRecord(
+                        orderId,
+                        resultEvent.eventId(),
+                        resultEvent.eventType(),
+                        eventPayload,
+                        PaymentOutboxRecord.PENDING,
+                        occurredAt
+                );
+
+        boolean created =
+                paymentRepository
+                        .createPaymentAndOutboxIfPending(
+                                orderId,
+                                targetStatus,
+                                occurredAt,
+                                outboxRecord
+                        );
+
+        if (created) {
+            publishAndMarkPublished(
+                    resultEvent,
+                    outboxRecord
+            );
             return;
         }
 
-        PaymentResultEvent resultEvent;
+        /*
+         * Another Lambda invocation won the transaction race.
+         * It may have created the outbox after our first lookup.
+         */
+        Optional<PaymentOutboxRecord> concurrentOutbox =
+                paymentRepository.findPendingOutbox(
+                        orderId
+                );
 
-        if (paymentSucceeds) {
-            resultEvent =
-                    PaymentResultEvent.completed(
-                            orderId,
-                            customerId,
-                            totalAmount,
-                            currency,
-                            occurredAt
+        if (concurrentOutbox.isPresent()) {
+            publishPendingOutbox(
+                    concurrentOutbox.get()
+            );
+        }
+    }
+
+    private void publishPendingOutbox(
+            PaymentOutboxRecord outbox
+    ) {
+        PaymentResultEvent event;
+
+        try {
+            event =
+                    objectMapper.readValue(
+                            outbox.eventPayload(),
+                            PaymentResultEvent.class
                     );
-        } else {
-            resultEvent =
-                    PaymentResultEvent.failed(
-                            orderId,
-                            customerId,
-                            totalAmount,
-                            currency,
-                            buildFailureReason(
-                                    customerId,
-                                    totalAmount
-                            ),
-                            occurredAt
-                    );
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "Failed to deserialize pending payment event",
+                    exception
+            );
         }
 
-        paymentEventPublisher.publish(
-                resultEvent
+        publishAndMarkPublished(
+                event,
+                outbox
         );
+    }
+
+    private void publishAndMarkPublished(
+            PaymentResultEvent event,
+            PaymentOutboxRecord outbox
+    ) {
+        paymentEventPublisher.publish(event);
+
+        paymentRepository.markOutboxPublished(
+                outbox.orderId(),
+                outbox.eventId(),
+                Instant.now()
+        );
+    }
+
+    private BigDecimal parseAmount(
+            String value
+    ) {
+        try {
+            return new BigDecimal(value);
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(
+                    "Invalid totalAmount",
+                    exception
+            );
+        }
     }
 
     private String buildFailureReason(

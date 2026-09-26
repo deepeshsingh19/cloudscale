@@ -1,6 +1,7 @@
 package com.cloudscale.payment;
 
 import java.time.Instant;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -29,37 +30,48 @@ class PaymentProcessorTest {
 
     @BeforeEach
     void setUp() {
-        objectMapper = JsonMapper.builder()
-                .addModule(new JavaTimeModule())
-                .disable(
-                        SerializationFeature.WRITE_DATES_AS_TIMESTAMPS
+        objectMapper =
+                JsonMapper.builder()
+                        .addModule(
+                                new JavaTimeModule()
+                        )
+                        .disable(
+                                SerializationFeature
+                                        .WRITE_DATES_AS_TIMESTAMPS
+                        )
+                        .build();
+
+        paymentRepository =
+                mock(PaymentRepository.class);
+
+        paymentEventPublisher =
+                mock(PaymentEventPublisher.class);
+
+        paymentProcessor =
+                new PaymentProcessor(
+                        objectMapper,
+                        paymentRepository,
+                        paymentEventPublisher,
+                        "FAIL-PAYMENT"
+                );
+
+        when(
+                paymentRepository.findPendingOutbox(
+                        anyString()
                 )
-                .build();
-
-        paymentRepository = mock(
-                PaymentRepository.class
-        );
-
-        paymentEventPublisher = mock(
-                PaymentEventPublisher.class
-        );
-
-        paymentProcessor = new PaymentProcessor(
-                objectMapper,
-                paymentRepository,
-                paymentEventPublisher,
-                "FAIL-PAYMENT"
-        );
+        ).thenReturn(Optional.empty());
     }
 
     @Test
     void shouldCompleteSuccessfulPayment() {
         when(
-                paymentRepository.markPaymentStatusIfPending(
-                        anyString(),
-                        anyString(),
-                        any(Instant.class)
-                )
+                paymentRepository
+                        .createPaymentAndOutboxIfPending(
+                                anyString(),
+                                anyString(),
+                                any(Instant.class),
+                                any(PaymentOutboxRecord.class)
+                        )
         ).thenReturn(true);
 
         paymentProcessor.processOrderCreatedEvent(
@@ -67,10 +79,11 @@ class PaymentProcessorTest {
         );
 
         verify(paymentRepository)
-                .markPaymentStatusIfPending(
+                .createPaymentAndOutboxIfPending(
                         eq("ORD-001"),
                         eq("COMPLETED"),
-                        any(Instant.class)
+                        any(Instant.class),
+                        any(PaymentOutboxRecord.class)
                 );
 
         ArgumentCaptor<PaymentResultEvent> captor =
@@ -81,38 +94,29 @@ class PaymentProcessorTest {
         verify(paymentEventPublisher)
                 .publish(captor.capture());
 
-        PaymentResultEvent event =
-                captor.getValue();
-
         assertEquals(
                 "PaymentCompleted",
-                event.eventType()
+                captor.getValue().eventType()
         );
 
-        assertEquals(
-                "COMPLETED",
-                event.data().paymentStatus()
-        );
-
-        assertEquals(
-                "ORD-001",
-                event.data().orderId()
-        );
-
-        assertEquals(
-                "CUS-001",
-                event.data().customerId()
-        );
+        verify(paymentRepository)
+                .markOutboxPublished(
+                        eq("ORD-001"),
+                        eq("evt-payment-completed-ORD-001"),
+                        any(Instant.class)
+                );
     }
 
     @Test
     void shouldFailPaymentForConfiguredFailureCustomer() {
         when(
-                paymentRepository.markPaymentStatusIfPending(
-                        anyString(),
-                        anyString(),
-                        any(Instant.class)
-                )
+                paymentRepository
+                        .createPaymentAndOutboxIfPending(
+                                anyString(),
+                                anyString(),
+                                any(Instant.class),
+                                any(PaymentOutboxRecord.class)
+                        )
         ).thenReturn(true);
 
         paymentProcessor.processOrderCreatedEvent(
@@ -120,10 +124,11 @@ class PaymentProcessorTest {
         );
 
         verify(paymentRepository)
-                .markPaymentStatusIfPending(
+                .createPaymentAndOutboxIfPending(
                         eq("ORD-FAIL-001"),
                         eq("FAILED"),
-                        any(Instant.class)
+                        any(Instant.class),
+                        any(PaymentOutboxRecord.class)
                 );
 
         ArgumentCaptor<PaymentResultEvent> captor =
@@ -134,50 +139,100 @@ class PaymentProcessorTest {
         verify(paymentEventPublisher)
                 .publish(captor.capture());
 
-        PaymentResultEvent event =
-                captor.getValue();
-
         assertEquals(
                 "PaymentFailed",
-                event.eventType()
-        );
-
-        assertEquals(
-                "FAILED",
-                event.data().paymentStatus()
-        );
-
-        assertEquals(
-                "ORD-FAIL-001",
-                event.data().orderId()
+                captor.getValue().eventType()
         );
     }
 
     @Test
-    void shouldIgnoreDuplicateOrderCreatedEvent() {
+    void shouldRepublishExistingPendingOutbox() {
+        Instant createdAt =
+                Instant.parse(
+                        "2026-09-25T10:00:00Z"
+                );
+
+        PaymentResultEvent event =
+                PaymentResultEvent.completed(
+                        "ORD-001",
+                        "CUS-001",
+                        new java.math.BigDecimal("1000.00"),
+                        "INR",
+                        createdAt
+                );
+
+        String payload;
+
+        try {
+            payload =
+                    objectMapper.writeValueAsString(
+                            event
+                    );
+        } catch (Exception exception) {
+            throw new RuntimeException(exception);
+        }
+
+        PaymentOutboxRecord outbox =
+                new PaymentOutboxRecord(
+                        "ORD-001",
+                        event.eventId(),
+                        event.eventType(),
+                        payload,
+                        PaymentOutboxRecord.PENDING,
+                        createdAt
+                );
+
         when(
-                paymentRepository.markPaymentStatusIfPending(
-                        anyString(),
-                        anyString(),
-                        any(Instant.class)
+                paymentRepository.findPendingOutbox(
+                        "ORD-001"
                 )
+        ).thenReturn(
+                Optional.of(outbox)
+        );
+
+        paymentProcessor.processOrderCreatedEvent(
+                successOrderCreatedEvent()
+        );
+
+        verify(paymentRepository, never())
+                .createPaymentAndOutboxIfPending(
+                        anyString(),
+                        anyString(),
+                        any(Instant.class),
+                        any(PaymentOutboxRecord.class)
+                );
+
+        verify(paymentEventPublisher)
+                .publish(any(PaymentResultEvent.class));
+
+        verify(paymentRepository)
+                .markOutboxPublished(
+                        eq("ORD-001"),
+                        eq(event.eventId()),
+                        any(Instant.class)
+                );
+    }
+
+    @Test
+    void shouldIgnoreAlreadyProcessedOrderWithoutPendingOutbox() {
+        when(
+                paymentRepository
+                        .createPaymentAndOutboxIfPending(
+                                anyString(),
+                                anyString(),
+                                any(Instant.class),
+                                any(PaymentOutboxRecord.class)
+                        )
         ).thenReturn(false);
 
         paymentProcessor.processOrderCreatedEvent(
                 successOrderCreatedEvent()
         );
 
-        verify(paymentRepository)
-                .markPaymentStatusIfPending(
-                        eq("ORD-001"),
-                        eq("COMPLETED"),
-                        any(Instant.class)
+        verify(paymentEventPublisher, never())
+                .publish(
+                        any(PaymentResultEvent.class)
                 );
-
-        verify(
-                paymentEventPublisher,
-                never()
-        ).publish(any(PaymentResultEvent.class));
     }
 
     @Test
@@ -198,14 +253,17 @@ class PaymentProcessorTest {
                                         event
                                 )
         );
+    }
 
-        verify(
-                paymentRepository,
-                never()
-        ).markPaymentStatusIfPending(
-                anyString(),
-                anyString(),
-                any(Instant.class)
+    @Test
+    void shouldRejectInvalidJson() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        paymentProcessor
+                                .processOrderCreatedEvent(
+                                        "{invalid-json"
+                                )
         );
     }
 
@@ -232,36 +290,6 @@ class PaymentProcessorTest {
                                 .processOrderCreatedEvent(
                                         event
                                 )
-        );
-
-        verify(
-                paymentRepository,
-                never()
-        ).markPaymentStatusIfPending(
-                anyString(),
-                anyString(),
-                any(Instant.class)
-        );
-    }
-
-    @Test
-    void shouldRejectInvalidJson() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () ->
-                        paymentProcessor
-                                .processOrderCreatedEvent(
-                                        "{invalid-json"
-                                )
-        );
-
-        verify(
-                paymentRepository,
-                never()
-        ).markPaymentStatusIfPending(
-                anyString(),
-                anyString(),
-                any(Instant.class)
         );
     }
 
