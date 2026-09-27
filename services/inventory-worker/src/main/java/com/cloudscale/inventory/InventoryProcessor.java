@@ -33,15 +33,25 @@ public class InventoryProcessor {
     }
 
     public void process(String messageBody) {
-        JsonNode event;
+        JsonNode root;
 
         try {
-            event = objectMapper.readTree(messageBody);
+            root = objectMapper.readTree(messageBody);
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("Invalid event JSON", e);
         }
 
+        JsonNode event = root;
+
+        if (root.has("detail") && root.get("detail").isObject()) {
+            event = root.get("detail");
+        }
+
         String eventType = event.path("eventType").asText(null);
+
+        if (eventType == null || eventType.isBlank()) {
+            eventType = root.path("detail-type").asText(null);
+        }
 
         if (!ORDER_CREATED.equals(eventType)) {
             return;
@@ -53,11 +63,15 @@ public class InventoryProcessor {
         String customerId = data.path("customerId").asText(null);
 
         if (orderId == null || orderId.isBlank()) {
-            throw new IllegalArgumentException("OrderCreated event is missing orderId");
+            throw new IllegalArgumentException(
+                    "OrderCreated event is missing orderId"
+            );
         }
 
         if (customerId == null || customerId.isBlank()) {
-            throw new IllegalArgumentException("OrderCreated event is missing customerId");
+            throw new IllegalArgumentException(
+                    "OrderCreated event is missing customerId"
+            );
         }
 
         Optional<InventoryOutboxRecord> existingOutbox =
@@ -71,6 +85,7 @@ public class InventoryProcessor {
         boolean failed = customerId.startsWith(failurePrefix);
 
         String targetStatus = failed ? FAILED : RESERVED;
+
         String resultEventType = failed
                 ? "InventoryFailed"
                 : "InventoryReserved";

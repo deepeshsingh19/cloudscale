@@ -9,10 +9,10 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.Optional;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 class InventoryProcessorTest {
@@ -68,6 +68,48 @@ class InventoryProcessorTest {
         verify(repository).markOutboxPublished(
                 eq("ORD-001"),
                 eq("evt-inventory-reserved-ORD-001"),
+                any(Instant.class)
+        );
+    }
+
+    @Test
+    void shouldProcessEventBridgeEnvelope() {
+        when(repository.createInventoryAndOutboxIfPending(
+                anyString(),
+                anyString(),
+                any(Instant.class),
+                any(InventoryOutboxRecord.class)
+        )).thenReturn(true);
+
+        String detail = orderCreatedEvent(
+                "ORD-ENVELOPE-001",
+                "CUS-ENVELOPE-001"
+        );
+
+        String eventBridgeEnvelope = """
+                {
+                  "version": "0",
+                  "id": "eventbridge-test-001",
+                  "source": "cloudscale.order-service",
+                  "detail-type": "OrderCreated",
+                  "detail": %s
+                }
+                """.formatted(detail);
+
+        processor.process(eventBridgeEnvelope);
+
+        verify(repository).createInventoryAndOutboxIfPending(
+                eq("ORD-ENVELOPE-001"),
+                eq("RESERVED"),
+                any(Instant.class),
+                any(InventoryOutboxRecord.class)
+        );
+
+        verify(publisher).publish(any(InventoryResultEvent.class));
+
+        verify(repository).markOutboxPublished(
+                eq("ORD-ENVELOPE-001"),
+                eq("evt-inventory-reserved-ORD-ENVELOPE-001"),
                 any(Instant.class)
         );
     }
