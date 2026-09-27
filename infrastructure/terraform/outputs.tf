@@ -52,3 +52,18 @@ output "payment_worker_role_arn" {
   description = "Payment Worker Lambda IAM role ARN."
   value       = aws_iam_role.payment_worker.arn
 }
+
+output "inventory_worker_function_name" {
+  description = "Inventory Worker Lambda function name."
+  value       = aws_lambda_function.inventory_worker.function_name
+}
+
+output "inventory_worker_function_arn" {
+  description = "Inventory Worker Lambda function ARN."
+  value       = aws_lambda_function.inventory_worker.arn
+}
+
+output "inventory_worker_role_arn" {
+  description = "Inventory Worker Lambda IAM role ARN."
+  value       = aws_iam_role.inventory_worker.arn
+}
