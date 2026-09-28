@@ -67,3 +67,38 @@ output "inventory_worker_role_arn" {
   description = "Inventory Worker Lambda IAM role ARN."
   value       = aws_iam_role.inventory_worker.arn
 }
+
+output "order_status_queue_url" {
+  description = "Order status SQS queue URL."
+  value       = aws_sqs_queue.order_status.url
+}
+
+output "order_status_queue_arn" {
+  description = "Order status SQS queue ARN."
+  value       = aws_sqs_queue.order_status.arn
+}
+
+output "order_status_worker_function_name" {
+  description = "Order Status Worker Lambda function name."
+  value       = aws_lambda_function.order_status_worker.function_name
+}
+
+output "order_status_worker_function_arn" {
+  description = "Order Status Worker Lambda function ARN."
+  value       = aws_lambda_function.order_status_worker.arn
+}
+output "order_api_function_name" {
+  value = aws_lambda_function.order_api.function_name
+}
+
+output "order_api_function_arn" {
+  value = aws_lambda_function.order_api.arn
+}
+
+output "order_api_gateway_endpoint" {
+  value = aws_apigatewayv2_api.order_api.api_endpoint
+}
+
+output "order_api_gateway_id" {
+  value = aws_apigatewayv2_api.order_api.id
+}
