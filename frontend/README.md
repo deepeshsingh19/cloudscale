@@ -1,16 +1,51 @@
-# React + Vite
+# CloudScale Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The CloudScale frontend is a React + Vite operations dashboard for the AWS order-processing platform.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- View orders and current processing state.
+- Create test orders.
+- Inspect payment and inventory status.
+- View the order-processing timeline.
+- View SQS, DLQ, Lambda, and EventBridge operational telemetry.
 
-## React Compiler
+## Setup
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Create a local environment file:
 
-## Expanding the Oxlint configuration
+```bash
+cp .env.example .env
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+Set:
+
+```env
+VITE_API_BASE_URL=https://97ptssr9kf.execute-api.ap-south-1.amazonaws.com
+```
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+Create a production build:
+
+```bash
+npm run build
+```
+
+Run linting:
+
+```bash
+npm run lint
+```
+
+The frontend can be deployed to Vercel with the `frontend/` directory as the project root and `VITE_API_BASE_URL` configured as an environment variable.
