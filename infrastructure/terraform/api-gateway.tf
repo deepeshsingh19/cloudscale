@@ -3,6 +3,26 @@ resource "aws_apigatewayv2_api" "order_api" {
   protocol_type = "HTTP"
   description   = "CloudScale Order API HTTP API."
 
+  cors_configuration {
+    allow_origins = [
+      "http://localhost:5173",
+      "http://127.0.0.1:5173"
+    ]
+
+    allow_methods = [
+      "GET",
+      "POST",
+      "OPTIONS"
+    ]
+
+    allow_headers = [
+      "content-type",
+      "idempotency-key"
+    ]
+
+    max_age = 300
+  }
+
   tags = {
     Project     = local.project_name
     Environment = local.environment
