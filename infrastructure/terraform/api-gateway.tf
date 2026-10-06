@@ -6,7 +6,8 @@ resource "aws_apigatewayv2_api" "order_api" {
   cors_configuration {
     allow_origins = [
       "http://localhost:5173",
-      "http://127.0.0.1:5173"
+      "http://127.0.0.1:5173",
+      "https://cloudscale.vercel.app"
     ]
 
     allow_methods = [
