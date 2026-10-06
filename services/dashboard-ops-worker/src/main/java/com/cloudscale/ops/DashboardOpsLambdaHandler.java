@@ -41,6 +41,7 @@ public class DashboardOpsLambdaHandler implements RequestStreamHandler {
 
     private static final String REGION = env("AWS_REGION", "ap-south-1");
     private static final String EVENT_BUS = env("CLOUDSCALE_EVENT_BUS", "cloudscale-dev-events");
+    private static final int METRIC_PUBLISHING_LAG_MINUTES = 2;
 
     private static final List<String> QUEUE_NAMES = List.of(
             env("CLOUDSCALE_PAYMENT_QUEUE", "cloudscale-dev-payment"),
@@ -92,12 +93,15 @@ public class DashboardOpsLambdaHandler implements RequestStreamHandler {
 
     private Map<String, Object> collectSnapshot() {
         Instant now = Instant.now();
-        Instant start = now.minus(Duration.ofMinutes(10));
-        Map<String, Double> metrics = loadMetrics(start, now);
+        Instant metricsEnd = now.minus(Duration.ofMinutes(METRIC_PUBLISHING_LAG_MINUTES));
+        Instant start = metricsEnd.minus(Duration.ofMinutes(10));
+        Map<String, Double> metrics = loadMetrics(start, metricsEnd);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("generatedAt", now);
+        response.put("metricsAsOf", metricsEnd);
         response.put("windowMinutes", 10);
+        response.put("metricsPublishingLagMinutes", METRIC_PUBLISHING_LAG_MINUTES);
         response.put("region", REGION);
         response.put("queues", collectQueues(start, now, metrics));
         response.put("lambdas", collectLambdas(metrics));
@@ -140,7 +144,7 @@ public class DashboardOpsLambdaHandler implements RequestStreamHandler {
             addMetricQuery(queries, queryNames, "event_" + key + "_invocations", "AWS/Events",
                     "Invocations", Map.of("EventBusName", EVENT_BUS, "RuleName", ruleName), "Sum");
             addMetricQuery(queries, queryNames, "event_" + key + "_failed", "AWS/Events",
-                    "FailedInvocations", Map.of("RuleName", ruleName), "Sum");
+                    "FailedInvocations", Map.of("EventBusName", EVENT_BUS, "RuleName", ruleName), "Sum");
         }
 
         GetMetricDataRequest request = GetMetricDataRequest.builder()
